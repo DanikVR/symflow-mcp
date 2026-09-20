@@ -1,0 +1,6 @@
+node_modules/
+symflow-out/
+.symflow-token
+*.log
+.DS_Store
+Thumbs.db

@@ -1,0 +1,38 @@
+name: Publish to npm
+
+# Пуш тега v1.2.3 → проверка синтаксиса → npm publish через Trusted Publishing (OIDC).
+# Токены не нужны: на npmjs.com у пакета настроен trusted publisher
+# (GitHub Actions, DanikVR/symflow-mcp, publish.yml). Нужен npm ≥ 11.5.1 — ставим свежий.
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - run: npm install -g npm@latest
+      - run: npm --version
+      - run: npm run check
+      - name: Is this version already on npm?
+        id: onnpm
+        run: |
+          V=$(node -p "require('./package.json').version")
+          N=$(node -p "require('./package.json').name")
+          if npm view "$N@$V" version >/dev/null 2>&1; then echo "exists=true" >> "$GITHUB_OUTPUT"; else echo "exists=false" >> "$GITHUB_OUTPUT"; fi
+      - name: Publish to npm (trusted publishing, provenance)
+        if: steps.onnpm.outputs.exists == 'false'
+        run: npm publish --provenance --access public
+      - name: Already published — skipped
+        if: steps.onnpm.outputs.exists == 'true'
+        run: echo "This version is already on npm; nothing to publish."

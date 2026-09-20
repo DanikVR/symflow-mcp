@@ -1,0 +1,51 @@
+{
+  "name": "symflow-mcp",
+  "version": "0.1.0",
+  "description": "MCP server for TikTok Symphony Creative Studio: Claude Code and Claude Desktop drive trend templates, reference-to-video, avatars, try-on, video refresh, dubbing and the editor through the SymFlow Chrome extension — on your own Symphony account and weekly credits.",
+  "type": "module",
+  "bin": {
+    "symflow-mcp": "bridge/mcp.mjs"
+  },
+  "files": [
+    "bridge/",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node bridge/mcp.mjs",
+    "bridge": "node bridge/server.mjs",
+    "check": "node --check bridge/mcp.mjs && node --check bridge/server.mjs"
+  },
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "claude",
+    "claude-code",
+    "claude-desktop",
+    "tiktok",
+    "tiktok-symphony",
+    "symphony-creative-studio",
+    "tiktok-ads",
+    "seedance",
+    "video-generation",
+    "ai-video",
+    "ai-avatar",
+    "dubbing",
+    "chrome-extension",
+    "automation"
+  ],
+  "author": "DanikVR (https://t.me/GuruAppSheet)",
+  "license": "MIT",
+  "homepage": "https://lingoflow.pro/symflow?utm_source=npm&utm_medium=package&utm_campaign=symflow-mcp",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/DanikVR/symflow-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/DanikVR/symflow-mcp/issues"
+  }
+}
