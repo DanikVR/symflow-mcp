@@ -342,7 +342,8 @@ export function createServer() {
         const n = Number(url.searchParams.get('n') || 1);
         const label = String(url.searchParams.get('label') || '');
         if (label && (t.tool === 'wait' || !t.label || t.label === t.tool)) t.label = label.slice(0, 80);
-        let file = path.join(dir, resultName(t, n, ext));
+        const custom = String(url.searchParams.get('name') || '').replace(/[^\p{L}\p{N} _.()-]+/gu, '').replace(/\.[a-z0-9]+$/i, '').trim().slice(0, 60);
+        let file = path.join(dir, custom ? `${String(t.seq || 0).padStart(2, '0')} ${custom}${ext}` : resultName(t, n, ext));
         for (let k = 2; fs.existsSync(file); k++) file = path.join(dir, resultName(t, n, ext).replace(/(\.[a-z0-9]+)$/i, ` ${k}$1`));
         fs.writeFileSync(file, buf);
         t.updatedAt = now();

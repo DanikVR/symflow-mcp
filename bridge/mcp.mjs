@@ -67,6 +67,8 @@ const TOOLS = [
       items: { type: 'array', description: 'One entry per clip', items: { type: 'object', properties: {
         mode: { type: 'string', enum: ['r2v', 'i2v', 't2v', 'i2i'], description: 'default: r2v when images are given, otherwise t2v' },
         prompt: { type: 'string', description: 'Prompt in English: subject → action → camera → light → mood. Name the product exactly as in the photo' },
+        continueFrom: { type: 'string', description: 'scene chaining: vid or draftId of the PREVIOUS clip (from sym_wait) — its last frame is captured in the studio tab and becomes the first frame of this clip (mode defaults to i2v), so the action continues seamlessly. Submit chained clips one after another: wait for clip N, then send clip N+1 with continueFrom. The frame is saved next to the clip as png' },
+        frameAt: { type: 'number', description: 'with continueFrom: second of the previous clip to continue from (negative = from the end); default: last frame' },
         images: FILES('Reference images/videos in order (paths or Symphony URLs). For i2v the first one is the frame'),
         templateId: { type: 'string', description: 'Trend template to build on (its reference image goes first)' },
         useTemplateReference: { type: 'boolean', description: 'default true' },
@@ -125,6 +127,9 @@ const TOOLS = [
     inputSchema: { type: 'object', properties: { draftId: { type: 'string' }, watermarked: { type: 'boolean' } }, required: ['draftId'] }, handler: (a) => quick('links', a, 180) },
   { name: 'sym_upload', description: 'Upload files into the Symphony library without generating anything (to reuse URLs/vids across tasks).',
     inputSchema: { type: 'object', properties: { files: FILES('files to upload') }, required: ['files'] }, handler: (a) => quick('upload', { files: a.files }, 600) },
+  { name: 'sym_frame', description: 'Capture one frame of a finished clip (vid / draftId from sym_history / https URL) as a png in a job folder — e.g. the last frame to check before chaining, or a still for a thumbnail. at: second (negative = from the end, default last frame). upload:true also stores it in the Symphony library and returns its URL for sym_generate. Returns jobId → sym_wait gives the path.',
+    inputSchema: { type: 'object', properties: { src: { type: 'string' }, at: { type: 'number' }, upload: { type: 'boolean' }, folder: { type: 'string' } }, required: ['src'] },
+    handler: (a) => postJob([{ tool: 'frame', params: { src: a.src, at: a.at, upload: !!a.upload }, noWait: true }], { folder: a.folder || 'Frames' }) },
   { name: 'sym_download', description: 'Download the files of an already finished studio task (taskId from sym_history / sym_status) into a job folder without generating anything. Returns jobId — get the paths with sym_wait.',
     inputSchema: { type: 'object', properties: { taskId: { type: 'string' }, watermarked: { type: 'boolean' }, folder: { type: 'string' } }, required: ['taskId'] },
     handler: (a) => postJob([{ tool: 'wait', params: { taskId: a.taskId, watermarked: !!a.watermarked, timeoutSec: 30 } }], { folder: a.folder || 'Downloads' }) },
