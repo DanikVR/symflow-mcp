@@ -133,9 +133,9 @@ function collectFiles(task, data) {
   for (const r of (data && data.results) || []) {
     for (const f of r.files || []) {
       n++;
+      if (f.file && fs.existsSync(f.file)) { files.push({ ...f }); continue; }   // already written by POST /file
       if (f.localPath && fs.existsSync(f.localPath)) {
-        const safe = String(task.label || task.tool).replace(/[^\p{L}\p{N} _-]+/gu, '').trim().slice(0, 48) || task.tool;
-        const target = path.join(dir, `${task.prefix ? task.prefix + ' ' : ''}${String(task.seq || 0).padStart(2, '0')} ${safe}${n > 1 ? ' (' + n + ')' : ''}${path.extname(f.localPath) || '.mp4'}`);
+        const target = path.join(dir, resultName(task, n, path.extname(f.localPath) || '.mp4'));
         try { fs.renameSync(f.localPath, target); } catch { try { fs.copyFileSync(f.localPath, target); fs.unlinkSync(f.localPath); } catch (e) { log('move failed: ' + e.message); files.push({ ...f, file: f.localPath }); continue; } }
         files.push({ ...f, file: target, localPath: undefined });
       } else files.push({ ...f });
@@ -161,6 +161,19 @@ function send(res, code, obj) {
   const body = JSON.stringify(obj);
   res.writeHead(code, { 'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(body) });
   res.end(body);
+}
+function readRaw(req, limit) {
+  return new Promise((resolve, reject) => {
+    let size = 0; const chunks = [];
+    req.on('data', (c) => { size += c.length; if (size > limit) { reject(new Error('file too large')); req.destroy(); return; } chunks.push(c); });
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
+}
+/** Name of a result file inside the job folder: prefix, sequence, label, variant number, extension. */
+function resultName(task, n, ext) {
+  const safe = String(task.label || task.tool).replace(/[^\p{L}\p{N} _-]+/gu, '').trim().slice(0, 48) || task.tool;
+  return `${task.prefix ? task.prefix + ' ' : ''}${String(task.seq || 0).padStart(2, '0')} ${safe}${n > 1 ? ' (' + n + ')' : ''}${ext}`;
 }
 function readBody(req) {
   return new Promise((resolve, reject) => {
@@ -251,6 +264,24 @@ export function createServer() {
         for (const t of picked) { t.status = 'running'; t.updatedAt = now(); t.startedAt = t.startedAt || now(); }
         return send(res, 200, { tasks: picked.map((t) => ({ id: t.id, tool: t.tool, params: t.params, dryRun: t.dryRun, noWait: t.noWait, resume: t.resume || null })) });
       }
+      // ── bytes of a finished file, fetched inside the studio tab (the CDN wants its Referer) ──
+      if (req.method === 'POST' && route === '/file') {
+        const t = tasks.get(String(url.searchParams.get('id') || ''));
+        if (!t) return send(res, 404, { error: 'no such task' });
+        const buf = await readRaw(req, 512 * 1024 * 1024);
+        const job = jobs.get(t.jobId);
+        const dir = job ? job.dir : OUT_DIR;
+        const ext = String(url.searchParams.get('ext') || '.mp4').replace(/[^.a-z0-9]/gi, '') || '.mp4';
+        const n = Number(url.searchParams.get('n') || 1);
+        const label = String(url.searchParams.get('label') || '');
+        if (label && (t.tool === 'wait' || !t.label || t.label === t.tool)) t.label = label.slice(0, 80);
+        let file = path.join(dir, resultName(t, n, ext));
+        for (let k = 2; fs.existsSync(file); k++) file = path.join(dir, resultName(t, n, ext).replace(/(\.[a-z0-9]+)$/i, ` ${k}$1`));
+        fs.writeFileSync(file, buf);
+        t.updatedAt = now();
+        log(`file ${path.basename(file)} ${buf.length} bytes`);
+        return send(res, 200, { ok: true, file, bytes: buf.length });
+      }
       if (req.method === 'POST' && route === '/progress') { const b = await readBody(req); const t = tasks.get(String(b.id || '')); if (!t) return send(res, 404, { error: 'no such task' }); t.updatedAt = now(); if (Array.isArray(b.taskIds)) t.taskIds = b.taskIds.map(String); if (b.submitted) t.submitted = b.submitted; return send(res, 200, { ok: true }); }
       if (req.method === 'POST' && route === '/result') {
         const b = await readBody(req);
@@ -258,7 +289,9 @@ export function createServer() {
         if (!t) return send(res, 404, { error: 'no such task' });
         t.updatedAt = now(); t.finishedAt = now();
         if (b.ok) {
-          t.data = b.data || null;
+          // after a service-worker restart the extension resumes by taskId and no longer knows the
+          // submit data (cost, model): merge what it reported at submit time
+          t.data = { ...(t.submitted || {}), ...(b.data || {}) };
           t.files = collectFiles(t, b.data);
           const results = (b.data && b.data.results) || [];
           const anyFail = results.some((r) => r.ok === false) || t.files.some((f) => f.status === 'failed');
