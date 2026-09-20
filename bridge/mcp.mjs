@@ -52,7 +52,7 @@ const FILE = { type: 'string', description: 'Absolute path on disk (the bridge r
 const FILES = (d) => ({ type: 'array', description: d, items: FILE });
 
 const TOOLS = [
-  { name: 'sym_status', description: 'Bridge and extension state: whether the SymFlow extension is connected, whether a Creative Studio tab is open and signed in, credits (weekly grant, spent, next refill, available models), the queue, the last templates sent with the "→ Claude" button (inbox) — plus `extension.director`, the director playbook sent by the extension. Call it FIRST and follow the playbook. If extension.license is "expired", ask the user to activate a key (https://lingoflow.pro/symflow); the queue resumes by itself.',
+  { name: 'sym_status', description: 'Bridge and extension state: whether the SymFlow extension is connected, whether a Creative Studio tab is open and signed in, credits (weekly grant, spent, next refill, available models), the queue, the last templates sent with the "→ Claude" button (inbox) — plus `extension.director`, the director playbook sent by the extension. `accounts` lists every TikTok account connected to this bridge (one browser profile with the extension = one account) with its credits: jobs are spread across them in parallel and a task that runs out of credits on one account moves to another automatically; `extension.totalCredits` is the sum. Call it FIRST and follow the playbook. If extension.license is "expired", ask the user to activate a key (https://lingoflow.pro/symflow); the queue resumes by itself.',
     inputSchema: { type: 'object', properties: {} }, handler: () => api('/health') },
   { name: 'sym_inbox', description: 'Templates the user sent from the studio page with the "→ Claude" button (full director prompt, reference image, sample). Newest first. clear:true empties the inbox after reading.',
     inputSchema: { type: 'object', properties: { clear: { type: 'boolean' } } }, handler: (a) => api('/inbox' + (a.clear ? '?clear=1' : '')) },
@@ -74,6 +74,7 @@ const TOOLS = [
         seconds: { type: 'number', description: '5 | 10 | 12 (Seedance 1.5/2.0) or 4–30 (Seedance 2.5)' },
         count: { type: 'number', description: 'variants 1–5 (each is a separate charge)' },
         watermarked: { type: 'boolean', description: 'also fetch the official watermarked export' },
+        account: { type: 'string', description: 'Pin this clip to one connected TikTok account (label, agentId or aioId from sym_status.accounts). Default: any account with enough credits' },
         dryRun: { type: 'boolean' },
       }, required: ['prompt'] } },
       folder: { type: 'string', description: 'Results subfolder' }, prefix: { type: 'string' }, dryRun: { type: 'boolean', description: 'dry run for all items' },

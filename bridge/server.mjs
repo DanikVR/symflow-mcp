@@ -70,7 +70,53 @@ const captureLog = [];      // dev: bodies captured by the extension
 let devReload = 0;
 let captureMode = false;
 const extLog = [];
-let ext = { seenAt: 0, tabReady: false, signedIn: false, url: '', version: '', license: 'unknown', idle: '', pausedUntil: 0, credits: null, creditsBlock: null };
+// Agents = browser profiles running the extension, one TikTok account each. All of them poll this
+// bridge; tasks are routed by credits and free slots, so several accounts work in parallel and a
+// task that hits "insufficient credits" on one account is retried on another.
+const agents = new Map();   // agentId → {seenAt, tabReady, signedIn, url, version, license, idle, pausedUntil, credits, creditsBlock, account, pricing, slots, running}
+const AGENT_STALE_MS = 25_000;
+const liveAgents = () => [...agents.values()].filter((a) => now() - a.seenAt < AGENT_STALE_MS);
+/** Aggregate view of all live agents — what Claude sees as `extension`. */
+function extView() {
+  const live = liveAgents();
+  const best = live.slice().sort((a, b) => Number(b.tabReady) - Number(a.tabReady) || ((b.credits && b.credits.credits) || 0) - ((a.credits && a.credits.credits) || 0))[0];
+  const any = best || [...agents.values()].sort((a, b) => b.seenAt - a.seenAt)[0] || { seenAt: 0, tabReady: false, signedIn: false, url: '', version: '', license: 'unknown', idle: '', pausedUntil: 0, credits: null, creditsBlock: null };
+  const total = live.reduce((n, a) => n + ((a.credits && a.credits.credits) || 0), 0);
+  return { ...any, connected: live.length > 0, agentsLive: live.length, totalCredits: total };
+}
+const DEVICE_FILE = path.join(os.homedir(), '.symflow-id');
+/** One id per machine: profiles that share this bridge count as ONE device for the license key. */
+function loadDeviceId() {
+  try { if (fs.existsSync(DEVICE_FILE)) { const t = fs.readFileSync(DEVICE_FILE, 'utf8').trim(); if (t) return t; } } catch { /* */ }
+  const t = 'sym-' + randomUUID();
+  try { fs.writeFileSync(DEVICE_FILE, t + '\n', 'utf8'); } catch { /* */ }
+  return t;
+}
+const DEVICE_ID = loadDeviceId();
+/** Credits a generate task will need, estimated from the agent's own price table (seconds × rate × count). */
+function estimateNeed(task, agent) {
+  if (task.tool !== 'generate' || task.dryRun) return 0;
+  if (task.needCredits) return task.needCredits;
+  const p = task.params || {};
+  if (p.mode === 'i2i') return 0;
+  const rate = (agent && agent.pricing && agent.pricing[String(p.modelId || '')]) || (agent && agent.pricing && agent.pricing.default) || 1;
+  const seconds = Number(p.seconds) || 5;
+  return Math.ceil(rate * seconds * Math.max(1, Math.min(5, Number(p.count) || 1)));
+}
+function agentLabel(a) { return (a && a.account && (a.account.label || a.account.aioId)) || (a && a.agentId) || 'default'; }
+function pickAgentFor(task, agentId) {
+  const a = agents.get(agentId);
+  if (!a) return false;
+  // a task already submitted to the studio belongs to ONE account: resume only there
+  if (task.status === 'running' && task.agentId && task.agentId !== agentId) return false;
+  if ((task.triedAgents || []).includes(agentId)) return false;
+  const pin = task.params && task.params.account;
+  if (pin && String(pin).toLowerCase() !== String(agentId).toLowerCase() && String(pin).toLowerCase() !== String(agentLabel(a)).toLowerCase() && !(a.account && String(a.account.aioId) === String(pin))) return false;
+  const have = a.credits ? Number(a.credits.credits) : null;
+  const need = estimateNeed(task, a);
+  if (need && have !== null && have < need) return false;
+  return true;
+}
 let brief = { text: '', digest: '', version: '' };
 const BRIEF_MAX = 40_000;
 const now = () => Date.now();
@@ -114,10 +160,11 @@ function normalizeItem(raw, opts) {
   task.label = String(params.prompt || params.script || params.productName || tool).slice(0, 80);
   return task;
 }
-function claimable(limit) {
+function claimable(limit, fits) {
   const out = [];
   for (const t of tasks.values()) {
     if (out.length >= limit) break;
+    if (fits && (t.status === 'queued' || t.status === 'running') && !fits(t)) continue;
     const stale = t.status === 'running' && now() - t.updatedAt > RESUME_MS && t.taskIds.length > 0;
     if (stale) { t.resumeCount = (t.resumeCount || 0) + 1; if (t.resumeCount > 3) { t.status = 'failed'; t.error = 'resume failed 3 times'; t.finishedAt = now(); continue; } t.resume = { taskIds: t.taskIds, n: t.resumeCount }; }
     if (t.status === 'queued' || stale) out.push(t);
@@ -146,7 +193,7 @@ function collectFiles(task, data) {
 function jobView(jobId) {
   const j = jobs.get(jobId);
   if (!j) return null;
-  const items = j.items.map((id) => { const t = tasks.get(id); return t ? { id: t.id, seq: t.seq, tool: t.tool, status: t.status, label: t.label, taskIds: t.taskIds, files: t.files.map((f) => f.file || f.links && (f.links.original || f.links.watermarked) || null).filter(Boolean), data: t.data, error: t.error, code: t.code || null, extra: t.extra || null, timedOut: !!t.timedOut } : null; }).filter(Boolean);
+  const items = j.items.map((id) => { const t = tasks.get(id); return t ? { id: t.id, seq: t.seq, tool: t.tool, status: t.status, label: t.label, taskIds: t.taskIds, account: t.agentLabel || null, note: t.note || null, files: t.files.map((f) => f.file || f.links && (f.links.original || f.links.watermarked) || null).filter(Boolean), data: t.data, error: t.error, code: t.code || null, extra: t.extra || null, timedOut: !!t.timedOut } : null; }).filter(Boolean);
   const done = items.filter((i) => i.status === 'done').length;
   const failed = items.filter((i) => i.status === 'failed').length;
   return { jobId, dir: j.dir, total: items.length, done, failed, finished: done + failed >= items.length, items };
@@ -155,7 +202,7 @@ function currentWork() {
   const run = [...tasks.values()].filter((t) => t.status === 'running');
   const queued = [...tasks.values()].filter((t) => t.status === 'queued');
   if (!run.length && !queued.length) return { state: 'idle' };
-  return { state: run.length ? 'running' : 'queued', running: run.map((t) => ({ id: t.id, tool: t.tool, label: t.label, sec: t.startedAt ? Math.round((now() - t.startedAt) / 1000) : null, taskIds: t.taskIds })), queued: queued.length };
+  return { state: run.length ? 'running' : 'queued', running: run.map((t) => ({ id: t.id, tool: t.tool, label: t.label, account: t.agentLabel || null, sec: t.startedAt ? Math.round((now() - t.startedAt) / 1000) : null, taskIds: t.taskIds })), queued: queued.length };
 }
 function send(res, code, obj) {
   const body = JSON.stringify(obj);
@@ -194,15 +241,18 @@ export function createServer() {
     const route = url.pathname.replace(/\/+$/, '') || '/';
     if (route !== '/ping' && !tokenOk(req.headers['x-symflow-token'] || url.searchParams.get('token'))) return send(res, 401, { error: 'SymFlow token required (~/.symflow-token)' });
     try {
-      if (req.method === 'GET' && route === '/ping') return send(res, 200, { ok: true, service: 'symflow', needsToken: !isLoopback(HOST), devReload });
+      if (req.method === 'GET' && route === '/ping') return send(res, 200, { ok: true, service: 'symflow', needsToken: !isLoopback(HOST), devReload, deviceId: DEVICE_ID });
       if (req.method === 'GET' && route === '/health') {
-        const alive = now() - ext.seenAt < EXT_STALE_MS;
+        const ext = extView();
+        const alive = ext.connected;
         return send(res, 200, {
           ok: true, outDir: OUT_DIR,
           extension: { connected: alive, tabReady: alive && ext.tabReady, signedIn: alive && ext.signedIn, url: ext.url, version: ext.version, license: ext.license,
             director: alive ? brief.text : '', directorDigest: alive ? brief.digest : '', lastSeenSecAgo: ext.seenAt ? Math.round((now() - ext.seenAt) / 1000) : null,
             idle: ext.idle || '', pausedForSec: ext.pausedUntil > now() ? Math.round((ext.pausedUntil - now()) / 1000) : 0,
-            credits: ext.credits, creditsBlock: ext.creditsBlock },
+            credits: ext.credits, creditsBlock: ext.creditsBlock, accountsLive: ext.agentsLive, totalCredits: ext.totalCredits },
+          // every TikTok account (browser profile) connected to this bridge — Claude may pin a task to one with params.account
+          accounts: liveAgents().map((a) => ({ agentId: a.agentId, label: agentLabel(a), aioId: a.account && a.account.aioId, tier: a.account && a.account.tier, credits: a.credits ? a.credits.credits : null, weeklyGrant: a.credits ? a.credits.weeklyGrant : null, models: a.credits ? a.credits.models : null, tabReady: a.tabReady, signedIn: a.signedIn, idle: a.idle || '', running: a.running || 0, slots: a.slots || 2 })),
           queue: { queued: [...tasks.values()].filter((t) => t.status === 'queued').length, running: [...tasks.values()].filter((t) => t.status === 'running').length, jobs: jobs.size },
           inbox: inbox.slice(-5).map((x) => ({ at: x.at, template: x.template && { templateId: x.template.templateId, name: x.template.name, description: x.template.description, duration: x.template.duration } })),
           now: currentWork(),
@@ -210,10 +260,12 @@ export function createServer() {
       }
       if (req.method === 'POST' && route === '/hello') {
         const b = await readBody(req);
-        ext = { seenAt: now(), tabReady: !!b.tabReady, signedIn: !!b.signedIn, url: String(b.url || '').slice(0, 200), version: String(b.version || ''), license: String(b.license || 'unknown').slice(0, 20), idle: String(b.idle || '').slice(0, 20), pausedUntil: Number(b.pausedUntil) || 0, credits: b.credits || null, creditsBlock: b.creditsBlock || null };
-        if (b.idle === 'busy') for (const x of tasks.values()) if (x.status === 'running') x.updatedAt = now();
-        const needBrief = !brief.text || brief.version !== ext.version;
-        return send(res, 200, { ok: true, devReload, needBrief, capture: captureMode });
+        const agentId = String(b.agentId || 'default').slice(0, 64);
+        const prev = agents.get(agentId) || {};
+        agents.set(agentId, { agentId, seenAt: now(), tabReady: !!b.tabReady, signedIn: !!b.signedIn, url: String(b.url || '').slice(0, 200), version: String(b.version || ''), license: String(b.license || 'unknown').slice(0, 20), idle: String(b.idle || '').slice(0, 20), pausedUntil: Number(b.pausedUntil) || 0, credits: b.credits || prev.credits || null, creditsBlock: b.creditsBlock || null, account: b.account || prev.account || null, pricing: b.pricing || prev.pricing || null, slots: Math.max(1, Math.min(4, Number(b.slots) || 2)), running: Number(b.running) || 0 });
+        if (b.idle === 'busy') for (const x of tasks.values()) if (x.status === 'running' && x.agentId === agentId) x.updatedAt = now();
+        const needBrief = !brief.text || brief.version !== String(b.version || '');
+        return send(res, 200, { ok: true, devReload, needBrief, capture: captureMode, deviceId: DEVICE_ID, agents: liveAgents().length });
       }
       if (req.method === 'POST' && route === '/brief') { const b = await readBody(req); brief = { text: String(b.brief || '').slice(0, BRIEF_MAX), digest: String(b.digest || '').slice(0, 32), version: String(b.version || '').slice(0, 20) }; return send(res, 200, { ok: true, chars: brief.text.length }); }
       if (req.method === 'POST' && route === '/log') { const b = await readBody(req); for (const l of (Array.isArray(b.lines) ? b.lines : [])) extLog.push({ t: Number(l.t) || now(), src: String(l.src || ''), text: String(l.text || '').slice(0, 400) }); if (extLog.length > 400) extLog.splice(0, extLog.length - 400); return send(res, 200, { ok: true }); }
@@ -258,10 +310,12 @@ export function createServer() {
         return send(res, 200, { ok: true, jobId, count: ids.length, dir });
       }
       if (req.method === 'GET' && route === '/next') {
-        ext.seenAt = now();
+        const agentId = String(url.searchParams.get('agent') || 'default').slice(0, 64);
+        const ag = agents.get(agentId);
+        if (ag) ag.seenAt = now();
         const limit = Math.max(1, Math.min(4, Number(url.searchParams.get('limit') || 1)));
-        const picked = claimable(limit);
-        for (const t of picked) { t.status = 'running'; t.updatedAt = now(); t.startedAt = t.startedAt || now(); }
+        const picked = ag ? claimable(limit, (t) => pickAgentFor(t, agentId)) : claimable(limit);
+        for (const t of picked) { t.status = 'running'; t.updatedAt = now(); t.startedAt = t.startedAt || now(); t.agentId = agentId; t.agentLabel = agentLabel(ag); }
         return send(res, 200, { tasks: picked.map((t) => ({ id: t.id, tool: t.tool, params: t.params, dryRun: t.dryRun, noWait: t.noWait, resume: t.resume || null })) });
       }
       // ── bytes of a finished file, fetched inside the studio tab (the CDN wants its Referer) ──
@@ -299,7 +353,26 @@ export function createServer() {
           t.status = anyFail && !t.files.some((f) => f.file) ? 'failed' : 'done';
           if (t.status === 'failed') t.error = (results.find((r) => r.ok === false) || {}).error || (t.files.find((f) => f.error) || {}).error || 'the studio reported a failure';
           log(`${t.status === 'done' ? '✓' : '✕'} ${t.seq} ${t.tool}: ${t.files.map((f) => path.basename(f.file || '')).filter(Boolean).join(', ') || (t.data && t.data.dryRun ? 'dry run' : t.error || 'no files')}`);
-        } else { t.status = 'failed'; t.error = String(b.error || 'no reason').slice(0, 400); t.code = b.code || null; t.extra = b.extra || null; log(`✕ ${t.seq} ${t.tool}: ${t.error}`); }
+        } else {
+          t.code = b.code || null; t.extra = b.extra || null;
+          if (b.code === 'insufficient-credits') {
+            // this account is out of credits: hand the task to another connected account that has enough
+            t.triedAgents = [...(t.triedAgents || []), t.agentId || 'default'];
+            t.needCredits = Number(b.extra && b.extra.need) || t.needCredits || 0;
+            const others = liveAgents().filter((a) => !t.triedAgents.includes(a.agentId) && (!a.credits || Number(a.credits.credits) >= t.needCredits));
+            if (others.length) {
+              t.status = 'queued'; t.error = null; t.finishedAt = null; t.updatedAt = now(); t.taskIds = []; t.resume = null; t.agentId = null;
+              t.note = `account ${t.agentLabel || 'default'} had ${Number(b.extra && b.extra.have) || 0} credits, needs ${t.needCredits} — moved to ${agentLabel(others[0])}`;
+              log(`↻ ${t.seq} ${t.tool}: ${t.note}`);
+              return send(res, 200, { ok: true, requeued: true });
+            }
+            const all = liveAgents().map((a) => `${agentLabel(a)}: ${a.credits ? a.credits.credits : '?'}`).join(', ');
+            t.status = 'failed'; t.error = `not enough Symphony credits on any connected account (need ${t.needCredits}; ${all || 'no accounts'})`;
+            log(`✕ ${t.seq} ${t.tool}: ${t.error}`);
+            return send(res, 200, { ok: true });
+          }
+          t.status = 'failed'; t.error = String(b.error || 'no reason').slice(0, 400); log(`✕ ${t.seq} ${t.tool}: ${t.error}`);
+        }
         return send(res, 200, { ok: true });
       }
       if (req.method === 'GET' && /^\/jobs\/[^/]+$/.test(route)) { const v = jobView(route.split('/')[2]); return v ? send(res, 200, v) : send(res, 404, { error: 'no such job' }); }
