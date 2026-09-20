@@ -148,10 +148,11 @@ const listFiles = (arr, kind) => (Array.isArray(arr) ? arr : []).map((x) => {
 /** Editor spec: clips and music given as local paths become transferable file specs (vid/draftId/URL pass through). */
 const isLocalFile = (v) => typeof v === 'string' && !/^https?:\/\//.test(v) && !/^v[0-9a-z]{20,40}$/i.test(v) && !/^\d{15,22}$/.test(v) && fs.existsSync(v) && fs.statSync(v).isFile();
 function normalizeEditor(params) {
-  const spec = params.spec && typeof params.spec === 'object' ? params.spec : params;
+  const spec = (params.spec && typeof params.spec === 'object') ? params.spec : ((params.draft && typeof params.draft === 'object' && params.draft.clips) ? params.draft : params);
   if (Array.isArray(spec.clips)) spec.clips = spec.clips.map((c) => {
     const o = typeof c === 'string' ? { src: c } : { ...(c || {}) };
     if (isLocalFile(o.src)) { o.file = fileSpec(o.src, 'video'); o.src = ''; }
+    if (isLocalFile(o.image)) { o.file = fileSpec(o.image, 'image'); o.image = ''; }
     return o;
   });
   if (spec.music && typeof spec.music === 'object' && isLocalFile(spec.music.src)) { spec.music.file = fileSpec(spec.music.src, 'audio'); delete spec.music.src; }
