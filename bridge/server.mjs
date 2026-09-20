@@ -145,6 +145,18 @@ const listFiles = (arr, kind) => (Array.isArray(arr) ? arr : []).map((x) => {
   return fileSpec(x.path, x.kind || kind, { role: x.role, label: x.label });
 });
 
+/** Editor spec: clips and music given as local paths become transferable file specs (vid/draftId/URL pass through). */
+const isLocalFile = (v) => typeof v === 'string' && !/^https?:\/\//.test(v) && !/^v[0-9a-z]{20,40}$/i.test(v) && !/^\d{15,22}$/.test(v) && fs.existsSync(v) && fs.statSync(v).isFile();
+function normalizeEditor(params) {
+  const spec = params.spec && typeof params.spec === 'object' ? params.spec : params;
+  if (Array.isArray(spec.clips)) spec.clips = spec.clips.map((c) => {
+    const o = typeof c === 'string' ? { src: c } : { ...(c || {}) };
+    if (isLocalFile(o.src)) { o.file = fileSpec(o.src, 'video'); o.src = ''; }
+    return o;
+  });
+  if (spec.music && typeof spec.music === 'object' && isLocalFile(spec.music.src)) { spec.music.file = fileSpec(spec.music.src, 'audio'); delete spec.music.src; }
+  if (spec.music && typeof spec.music === 'string') spec.music = isLocalFile(spec.music) ? { file: fileSpec(spec.music, 'audio') } : (/^https?:/.test(spec.music) ? { url: spec.music } : { query: spec.music });
+}
 /** Normalise one job item. `tool` selects the adapter routine; params are passed through. */
 function normalizeItem(raw, opts) {
   const it = raw && typeof raw === 'object' ? raw : {};
@@ -157,7 +169,8 @@ function normalizeItem(raw, opts) {
   if (params.audios) params.audios = listFiles(params.audios, 'audio');
   if (params.files) params.files = listFiles(params.files);
   if (params.frame) { params.images = [...listFiles([params.frame], 'image'), ...(params.images || [])]; delete params.frame; }
-  task.label = String(params.prompt || params.script || params.productName || tool).slice(0, 80);
+  if (tool === 'editor') normalizeEditor(params);
+  task.label = String(params.prompt || params.script || params.productName || (params.spec && params.spec.name) || params.name || tool).slice(0, 80);
   return task;
 }
 function claimable(limit, fits) {
